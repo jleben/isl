@@ -1378,3 +1378,28 @@ __isl_give isl_local_space *isl_local_space_wrap(__isl_take isl_local_space *ls)
 
 	return ls;
 }
+
+__isl_give isl_local_space *isl_local_space_unwrap(
+	__isl_take isl_local_space *ls)
+{
+	if (!ls)
+		return NULL;
+
+	ls = isl_local_space_cow(ls);
+	if (!ls)
+		return NULL;
+
+	ls->dim = isl_space_unwrap(ls->dim);
+	if (!ls->dim)
+		return isl_local_space_free(ls);
+
+	return ls;
+}
+
+int isl_local_space_is_wrapping(__isl_keep isl_local_space *ls)
+{
+	if (!ls)
+		return -1;
+
+	return isl_space_is_wrapping(ls->dim);
+}
