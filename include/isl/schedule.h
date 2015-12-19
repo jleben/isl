@@ -17,6 +17,21 @@ extern "C" {
 struct isl_schedule_constraints;
 typedef struct isl_schedule_constraints isl_schedule_constraints;
 
+struct isl_scheduler;
+typedef isl_bool (*isl_schedule_constraint_filter_fn)
+(struct isl_scheduler *, void * user);
+
+__isl_give isl_basic_set * isl_scheduler_get_user_coefs(struct isl_scheduler *);
+void isl_scheduler_set_user_coefs(struct isl_scheduler *, __isl_take isl_basic_set *);
+int isl_scheduler_get_user_coef_pos(struct isl_scheduler *, __isl_keep isl_space *);
+
+__isl_give isl_basic_set * isl_scheduler_get_coefs(struct isl_scheduler *);
+int isl_scheduler_get_coef_pos(struct isl_scheduler *, __isl_keep isl_space *);
+
+__isl_give struct isl_schedule_node *
+isl_scheduler_get_current_node(struct isl_scheduler*);
+int isl_scheduler_get_current_dim(struct isl_scheduler*);
+
 isl_stat isl_options_set_schedule_max_coefficient(isl_ctx *ctx, int val);
 int isl_options_get_schedule_max_coefficient(isl_ctx *ctx);
 
@@ -69,6 +84,10 @@ isl_schedule_constraints_set_conditional_validity(
 	__isl_take isl_union_map *validity);
 __isl_null isl_schedule_constraints *isl_schedule_constraints_free(
 	__isl_take isl_schedule_constraints *sc);
+
+__isl_give isl_schedule_constraints *isl_schedule_constraints_set_constraint_filter(
+        __isl_take isl_schedule_constraints *sc,
+        isl_schedule_constraint_filter_fn filter, void * user);
 
 isl_ctx *isl_schedule_constraints_get_ctx(
 	__isl_keep isl_schedule_constraints *sc);

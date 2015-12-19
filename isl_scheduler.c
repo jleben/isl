@@ -33,6 +33,7 @@
 #include <isl_morph.h>
 #include <isl/ilp.h>
 #include <isl_val_private.h>
+#include <assert.h>
 
 /*
  * The scheduling algorithm implemented in this file was inspired by
@@ -72,9 +73,17 @@ enum isl_edge_type {
  * A dependence is local within a band if domain and range are mapped
  * to the same schedule point by the band.
  */
+
+struct isl_schedule_constraint_filter {
+    isl_schedule_constraint_filter_fn fn;
+    void * data;
+};
+
 struct isl_schedule_constraints {
 	isl_union_set *domain;
 	isl_set *context;
+
+    struct isl_schedule_constraint_filter constraint_filter;
 
 	isl_union_map *constraint[isl_edge_last + 1];
 };
@@ -93,6 +102,7 @@ __isl_give isl_schedule_constraints *isl_schedule_constraints_copy(
 
 	sc_copy->domain = isl_union_set_copy(sc->domain);
 	sc_copy->context = isl_set_copy(sc->context);
+    sc_copy->constraint_filter = sc->constraint_filter;
 	if (!sc_copy->domain || !sc_copy->context)
 		return isl_schedule_constraints_free(sc_copy);
 
@@ -136,6 +146,8 @@ __isl_give isl_schedule_constraints *isl_schedule_constraints_on_domain(
 			sc->domain = isl_union_set_free(sc->domain);
 	}
 	isl_union_map_free(empty);
+    sc->constraint_filter.fn = NULL;
+    sc->constraint_filter.data = NULL;
 
 	if (!sc->domain || !sc->context)
 		return isl_schedule_constraints_free(sc);
@@ -244,6 +256,15 @@ error:
 	isl_union_map_free(condition);
 	isl_union_map_free(validity);
 	return NULL;
+}
+
+__isl_give isl_schedule_constraints *isl_schedule_constraints_set_constraint_filter(
+        __isl_take isl_schedule_constraints *sc,
+        isl_schedule_constraint_filter_fn fn, void * user)
+{
+    sc->constraint_filter.fn = fn;
+    sc->constraint_filter.data = user;
+    return sc;
 }
 
 __isl_null isl_schedule_constraints *isl_schedule_constraints_free(
@@ -818,6 +839,15 @@ struct isl_sched_graph {
 	int weak;
 
 	int max_weight;
+
+	struct isl_schedule_constraint_filter constraint_filter;
+};
+
+
+struct isl_scheduler {
+    struct isl_sched_graph * graph;
+    struct isl_schedule_node * node;
+    isl_basic_set *user_coefs;
 };
 
 /* Initialize node_table based on the list of nodes.
@@ -1119,6 +1149,72 @@ static void graph_free(isl_ctx *ctx, struct isl_sched_graph *graph)
 		isl_hash_table_free(ctx, graph->edge_table[i]);
 	isl_hash_table_free(ctx, graph->node_table);
 	isl_basic_set_free(graph->lp);
+}
+
+
+isl_space * isl_schedule_compute_user_coef_space(struct isl_sched_graph * graph)
+{
+    // FIXME: What to do with global schedule existentials and params?
+    // Are they supported in the scheduling optimization problem?
+
+    int dim_count = 0;
+    int i;
+    for (i = 0; i < graph->n; ++i) {
+        struct isl_sched_node *node = &graph->node[i];
+        dim_count += isl_space_dim(node->space, isl_dim_all) + 1;
+    }
+
+    isl_ctx * ctx = isl_basic_set_get_ctx(graph->lp);
+    return isl_space_set_alloc(ctx, 0, dim_count);
+}
+
+__isl_give isl_basic_set * isl_scheduler_get_user_coefs(struct isl_scheduler * s)
+{
+    return isl_basic_set_copy(s->user_coefs);
+}
+
+void isl_scheduler_set_user_coefs(struct isl_scheduler * s, __isl_take isl_basic_set * c)
+{
+    isl_basic_set_free(s->user_coefs);
+    s->user_coefs = c;
+}
+
+int isl_scheduler_get_user_coef_pos(struct isl_scheduler * s, __isl_keep isl_space * spc)
+{
+    int pos = 0;
+    int i;
+    for (i = 0; i < s->graph->n; ++i) {
+        struct isl_sched_node *node = &s->graph->node[i];
+        if (isl_space_is_equal(node->space, spc))
+            return pos;
+        pos += isl_space_dim(node->space, isl_dim_all) + 1;
+    }
+    return -1;
+}
+
+__isl_give isl_basic_set * isl_scheduler_get_coefs(struct isl_scheduler * s)
+{
+    return isl_basic_set_copy(s->graph->lp);
+}
+
+int isl_scheduler_get_coef_pos(struct isl_scheduler * s, __isl_keep isl_space * d)
+{
+    struct isl_sched_node * node = graph_find_node(isl_space_get_ctx(d), s->graph, d);
+    if (!node)
+        return -1;
+    return node->start;
+}
+
+__isl_give struct isl_schedule_node *
+isl_scheduler_get_current_node(struct isl_scheduler * s)
+{
+    return isl_schedule_node_copy(s->node);
+}
+
+int
+isl_scheduler_get_current_dim(struct isl_scheduler * s)
+{
+    return s->graph->n_row;
 }
 
 /* For each "set" on which this function is called, increment
@@ -1751,6 +1847,8 @@ static isl_stat graph_init(struct isl_sched_graph *graph,
 						&extract_edge, &data) < 0)
 			return isl_stat_error;
 	}
+
+	graph->constraint_filter = sc->constraint_filter;
 
 	return isl_stat_ok;
 }
@@ -2918,6 +3016,322 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	return isl_stat_ok;
 }
 
+static __isl_give isl_mat *
+mat_from_compression(__isl_take isl_multi_aff * maff)
+{
+    if (!maff)
+        return NULL;
+
+    isl_ctx * ctx = isl_multi_aff_get_ctx(maff);
+    isl_space * space = isl_multi_aff_get_space(maff);
+    isl_mat * mat = isl_mat_alloc
+            (ctx,
+             isl_space_dim(space, isl_dim_out),
+             isl_space_dim(space, isl_dim_param) +
+             isl_space_dim(space, isl_dim_in) + 1);
+
+    int row;
+    for (row = 0; row < isl_mat_rows(mat); ++row)
+    {
+        isl_aff * maff_row = isl_multi_aff_get_aff(maff, row);
+        int p,i;
+        for (p = 0; p < isl_space_dim(space, isl_dim_param); ++p)
+        {
+            int col = p;
+            isl_val * val = isl_aff_get_coefficient_val(maff_row, isl_dim_param, p);
+            mat = isl_mat_set_element_val(mat, row, col, val);
+        }
+        for (i = 0; i < isl_space_dim(space, isl_dim_in); ++i)
+        {
+            int col = p + i;
+            isl_val * val = isl_aff_get_coefficient_val(maff_row, isl_dim_in, i);
+            mat = isl_mat_set_element_val(mat, row, col, val);
+        }
+        isl_val * cst = isl_aff_get_constant_val(maff_row);
+        mat = isl_mat_set_element_val(mat, row, p+i, cst);
+        isl_aff_free(maff_row);
+    }
+
+    isl_multi_aff_free(maff);
+    isl_space_free(space);
+    return mat;
+}
+
+static __isl_give isl_multi_aff *
+compression_from_mat(__isl_take isl_mat * mat)
+{
+    isl_ctx * ctx = isl_mat_get_ctx(mat);
+    int n_in = isl_mat_cols(mat);
+    int n_out = isl_mat_rows(mat);
+    isl_space * space = isl_space_alloc(ctx, 0, n_in, n_out);
+    isl_multi_aff * maff = isl_multi_aff_zero(space);
+    int in, out;
+    for(out = 0; out < n_out; ++out)
+    {
+        isl_aff * aff = isl_multi_aff_get_aff(maff, out);
+        for (in = 0; in < n_in; ++in)
+        {
+            isl_val * val = isl_mat_get_element_val(mat, out, in);
+            aff = isl_aff_set_coefficient_val(aff, isl_dim_in, in, val);
+        }
+        maff = isl_multi_aff_set_aff(maff, out, aff);
+    }
+    isl_mat_free(mat);
+    return maff;
+}
+
+static isl_stat filter_lp(isl_ctx * ctx, struct isl_schedule_node * node,
+                          struct isl_sched_graph * graph)
+{
+    static int debug = 0;
+
+    if (debug)
+        printf("Filtering constraints...\n");
+
+    if(!graph->constraint_filter.fn)
+    {
+        if(debug)
+            printf("No filter.\n");
+        return isl_stat_ok;
+    }
+
+    isl_stat result = isl_stat_ok;
+
+    isl_printer * p = isl_printer_to_file(ctx, stdout);
+
+    isl_basic_set * constraints = NULL;
+
+    {
+        // FIXME: Could compute only once per graph?
+        isl_space * coef_space = isl_schedule_compute_user_coef_space(graph);
+        constraints = isl_basic_set_universe(isl_space_copy(coef_space));
+
+        isl_bool user_result;
+        {
+            struct isl_scheduler me;
+            me.graph = graph;
+            me.node = node;
+            me.user_coefs = constraints;
+
+            user_result = graph->constraint_filter.fn
+                    (&me, graph->constraint_filter.data);
+
+            constraints = me.user_coefs;
+        }
+
+        if (user_result == isl_bool_error)
+        {
+            if (debug)
+                printf("Schedule rejected by user.\n");
+            isl_space_free(coef_space);
+            result = isl_stat_error;
+            goto error;
+        }
+
+        if (user_result == isl_bool_false)
+        {
+            if (debug)
+                printf("Schedule not filtered by user.\n");
+            isl_space_free(coef_space);
+            result = isl_stat_ok;
+            goto error;
+        }
+
+        if (debug)
+            puts("C: "); p = isl_printer_print_basic_set(p, constraints); putchar('\n');
+
+        if(!isl_space_is_equal(isl_basic_set_get_space(constraints), coef_space))
+        {
+            isl_space_free(coef_space);
+            result = isl_stat_error;
+            isl_die(ctx, isl_error_invalid,
+                    "User constraint space is wrong.", goto error);
+        }
+
+        isl_space_free(coef_space);
+    }
+
+    // Map constraints into compressed statement domains
+    {
+        isl_multi_aff * global_coef_map =
+                isl_multi_aff_zero(isl_space_alloc(ctx, 0, 0, 0));
+        int gcmap_n_in = 0;
+        int gcmap_n_out = 0;
+
+        int i;
+        for (i = 0; i < graph->n; ++i)
+        {
+            struct isl_sched_node *node = &graph->node[i];
+
+            if (node->compressed)
+            {
+                isl_multi_aff * dom_map = node->compress;
+                if (debug) {
+                    printf("Using node's domain map:\n");
+                    p = isl_printer_print_multi_aff(p, dom_map); printf("\n");
+                }
+
+                //int n_dom_in = isl_multi_aff_dim(dom_map, isl_dim_in);
+                //int n_dom_out = isl_multi_aff_dim(dom_map, isl_dim_out);
+
+                isl_mat * mat = mat_from_compression(isl_multi_aff_copy(dom_map));
+                mat = isl_mat_transpose(mat);
+                mat = isl_mat_add_zero_cols(mat, 1);
+                mat = isl_mat_set_element_si
+                        (mat, isl_mat_rows(mat)-1, isl_mat_cols(mat)-1, 1);
+
+                int n_decomp_param = isl_space_dim(node->space, isl_dim_param);
+                int n_decomp_var = isl_space_dim(node->space, isl_dim_set);
+
+                isl_multi_aff * coef_map = compression_from_mat(mat);
+                int n_coef_map_in = isl_multi_aff_dim(coef_map, isl_dim_in);
+                int n_coef_map_out = isl_multi_aff_dim(coef_map, isl_dim_out);
+
+                // coef_map is parameter *decompression*
+                assert(n_coef_map_out ==
+                       n_decomp_param + n_decomp_var + 1);
+                assert(n_coef_map_in ==
+                       node->nparam + node->nvar + 1);
+
+                if (debug) {
+                    printf("Coef map:\n");
+                    p = isl_printer_print_multi_aff(p, coef_map); printf("\n");
+                }
+
+                global_coef_map = isl_multi_aff_splice
+                        (global_coef_map, gcmap_n_in, gcmap_n_out, coef_map);
+                gcmap_n_in += n_coef_map_in;
+                gcmap_n_out += n_coef_map_out;
+            }
+            else
+            {
+                if (debug)
+                    printf("Creating identity domain map.\n");
+
+                int n_param = isl_space_dim(node->space, isl_dim_param);
+                int n_var = isl_space_dim(node->space, isl_dim_set);
+                int n_coef = n_param + n_var + 1;
+                isl_space * s = isl_space_alloc(ctx, 0, n_coef, n_coef);
+                isl_multi_aff * coef_map = isl_multi_aff_identity(s);
+
+                if (debug) {
+                    printf("Coef map:\n");
+                    p = isl_printer_print_multi_aff(p, coef_map); printf("\n");
+                }
+
+                global_coef_map =
+                        isl_multi_aff_splice(global_coef_map, gcmap_n_in, gcmap_n_out,
+                                             coef_map);
+                gcmap_n_in += n_coef;
+                gcmap_n_out += n_coef;
+            }
+        }
+
+        if (debug) {
+            puts("Global coef map: ");
+            p = isl_printer_print_multi_aff(p, global_coef_map);
+            putchar('\n');
+        }
+
+        assert(isl_multi_aff_dim(global_coef_map, isl_dim_out) ==
+               isl_basic_set_dim(constraints, isl_dim_set));
+
+        constraints = isl_basic_set_preimage_multi_aff(constraints, global_coef_map);
+    }
+
+    if (debug) {
+        puts("Compressed C: ");
+        p = isl_printer_print_basic_set(p, constraints); putchar('\n');
+    }
+
+    // Map constraints using node->cmap
+
+    {
+        int coef_idx = 0;
+        int i;
+        for (i = 0; i < graph->n; ++i)
+        {
+            struct isl_sched_node *node = &graph->node[i];
+            constraints =
+                    isl_basic_set_transform_dims(constraints, isl_dim_set,
+                                                 coef_idx + node->nparam,
+                                                 isl_mat_copy(node->cmap));
+            coef_idx += node->nparam + node->nvar + 1;
+        }
+        assert(coef_idx == isl_basic_set_dim(constraints, isl_dim_set));
+
+        if (debug) {
+            printf("Mapped C: ");
+            p = isl_printer_print_basic_set(p, constraints); putchar('\n');
+        }
+    }
+
+    // Add constraints to graph->lp
+    {
+        int n_total_coef = isl_basic_set_total_dim(graph->lp);
+        isl_dim_map * dim_map = isl_dim_map_alloc(ctx, n_total_coef);
+
+        int coef_idx = 0;
+        int i;
+        for (i = 0; i < graph->n; ++i)
+        {
+            struct isl_sched_node *node = &graph->node[i];
+
+            // Map coef for constant
+            isl_dim_map_range(dim_map,
+                              node->start, 0,
+                              coef_idx + node->nparam + node->nvar, 0,
+                              1, 1);
+
+            // Map coefs for params
+            isl_dim_map_range(dim_map,
+                              node->start + 1, 2,
+                              coef_idx, 1,
+                              node->nparam, -1);
+            isl_dim_map_range(dim_map,
+                              node->start + 1 + 1, 2,
+                              coef_idx, 1,
+                              node->nparam, 1);
+
+            // Map coefs for vars
+            isl_dim_map_range(dim_map,
+                              node->start + 1 + 2 * node->nparam, 2,
+                              coef_idx + node->nparam, 1,
+                              node->nvar, -1);
+            isl_dim_map_range(dim_map,
+                              node->start + 1 + 2 * node->nparam + 1, 2,
+                              coef_idx + node->nparam, 1,
+                              node->nvar, 1);
+
+            coef_idx += node->nparam + node->nvar + 1;
+        }
+
+        if (debug) {
+            printf("-- Original LP:\n");
+            p = isl_printer_print_basic_set(p, graph->lp); putchar('\n');
+        }
+
+        graph->lp = isl_basic_set_extend_constraints
+                (graph->lp, constraints->n_eq, constraints->n_ineq);
+
+        graph->lp = isl_basic_set_add_constraints_dim_map
+                (graph->lp, constraints, dim_map);
+
+        if (debug) {
+            printf("-- Extended LP:\n");
+            p = isl_printer_print_basic_set(p, graph->lp); putchar('\n');
+        }
+    }
+
+    isl_printer_free(p);
+    return isl_stat_ok;
+
+error:
+    isl_printer_free(p);
+    isl_basic_set_free(constraints);
+    return result;
+}
+
 /* Analyze the conflicting constraint found by
  * isl_tab_basic_set_non_trivial_lexmin.  If it corresponds to the validity
  * constraint of one of the edges between distinct nodes, living, moreover
@@ -3698,6 +4112,7 @@ static int extract_sub_graph(isl_ctx *ctx, struct isl_sched_graph *graph,
 	sub->max_row = graph->max_row;
 	sub->n_total_row = graph->n_total_row;
 	sub->band_start = graph->band_start;
+	sub->constraint_filter = graph->constraint_filter;
 
 	return 0;
 }
@@ -3730,7 +4145,6 @@ static __isl_give isl_schedule_node *compute_sub_schedule(
 	if (extract_sub_graph(ctx, graph, node_pred, edge_pred, data,
 				&split) < 0)
 		goto error;
-
 	if (wcc)
 		node = compute_schedule_wcc(node, &split);
 	else
@@ -5031,6 +5445,8 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 
 		if (setup_lp(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
+		if (filter_lp(ctx, node, graph) != isl_stat_ok)
+			return isl_stat_error;
 		sol = solve_lp(graph);
 		if (!sol)
 			return isl_stat_error;
@@ -5600,6 +6016,8 @@ static isl_stat init_merge_graph(isl_ctx *ctx, struct isl_sched_graph *graph,
 	cluster_map = collect_cluster_map(ctx, graph, c);
 	sc = collect_constraints(graph, c->scc_in_merge, cluster_map, sc);
 	isl_union_map_free(cluster_map);
+
+	sc->constraint_filter = graph->constraint_filter;
 
 	r = graph_init(merge_graph, sc);
 
