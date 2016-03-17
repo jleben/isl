@@ -3138,7 +3138,9 @@ static isl_stat filter_lp(isl_ctx * ctx, struct isl_schedule_node * node,
         }
 
         if (debug)
+        {
             puts("C: "); p = isl_printer_print_basic_set(p, constraints); putchar('\n');
+        }
 
         isl_space * user_coef_space = isl_basic_set_get_space(constraints);
         int user_coef_space_ok = isl_space_is_equal(user_coef_space, coef_space);
