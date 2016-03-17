@@ -3140,15 +3140,18 @@ static isl_stat filter_lp(isl_ctx * ctx, struct isl_schedule_node * node,
         if (debug)
             puts("C: "); p = isl_printer_print_basic_set(p, constraints); putchar('\n');
 
-        if(!isl_space_is_equal(isl_basic_set_get_space(constraints), coef_space))
+        isl_space * user_coef_space = isl_basic_set_get_space(constraints);
+        int user_coef_space_ok = isl_space_is_equal(user_coef_space, coef_space);
+
+        isl_space_free(user_coef_space);
+        isl_space_free(coef_space);
+
+        if(!user_coef_space_ok)
         {
-            isl_space_free(coef_space);
             result = isl_stat_error;
             isl_die(ctx, isl_error_invalid,
                     "User constraint space is wrong.", goto error);
         }
-
-        isl_space_free(coef_space);
     }
 
     // Map constraints into compressed statement domains
