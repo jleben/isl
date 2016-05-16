@@ -3080,8 +3080,7 @@ compression_from_mat(__isl_take isl_mat * mat)
     return maff;
 }
 
-static isl_stat filter_lp(isl_ctx * ctx, struct isl_schedule_node * node,
-                          struct isl_sched_graph * graph)
+static isl_stat filter_lp(isl_ctx * ctx, struct isl_sched_graph * graph)
 {
     static int debug = 0;
 
@@ -3110,7 +3109,7 @@ static isl_stat filter_lp(isl_ctx * ctx, struct isl_schedule_node * node,
         {
             struct isl_scheduler me;
             me.graph = graph;
-            me.node = node;
+            me.node = 0;
             me.user_coefs = constraints;
 
             user_result = graph->constraint_filter.fn
@@ -5450,7 +5449,7 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 
 		if (setup_lp(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
-		if (filter_lp(ctx, node, graph) != isl_stat_ok)
+		if (filter_lp(ctx, graph) != isl_stat_ok)
 			return isl_stat_error;
 		sol = solve_lp(graph);
 		if (!sol)
