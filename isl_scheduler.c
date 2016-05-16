@@ -850,6 +850,8 @@ struct isl_scheduler {
     isl_basic_set *user_coefs;
 };
 
+static void print_graph(isl_ctx * ctx, struct isl_sched_graph *graph);
+
 /* Initialize node_table based on the list of nodes.
  */
 static int graph_init_table(isl_ctx *ctx, struct isl_sched_graph *graph)
@@ -5569,6 +5571,9 @@ static isl_stat clustering_init(isl_ctx *ctx, struct isl_clustering *c,
 		if (compute_schedule_wcc_band(ctx, &c->scc[i]) < 0)
 			return isl_stat_error;
 		c->scc_cluster[i] = i;
+
+		printf("-- Scheduled partial graph:\n");
+		print_graph(ctx, c->scc+i);
 	}
 
 	return isl_stat_ok;
@@ -6449,21 +6454,32 @@ static isl_bool ok_to_merge(isl_ctx *ctx, struct isl_sched_graph *graph,
 	struct isl_clustering *c, struct isl_sched_graph *merge_graph)
 {
 	if (merge_graph->n_total_row == merge_graph->band_start)
+	{
+		printf("Current band empty.\n");
 		return isl_bool_false;
+	}
 
 	if (isl_options_get_schedule_maximize_band_depth(ctx) &&
 	    merge_graph->n_total_row < merge_graph->maxvar)
+	{
+		printf("Violates maximizing band depth.\n");
 		return isl_bool_false;
+	}
 
 	if (isl_options_get_schedule_maximize_coincidence(ctx)) {
 		isl_bool ok;
 
 		ok = ok_to_merge_coincident(c, merge_graph);
+		if (!ok)
+			printf("Violates maximizing coincidence.\n");
 		if (ok < 0 || !ok)
 			return ok;
 	}
 
-	return ok_to_merge_proximity(ctx, graph, c, merge_graph);
+	isl_bool ok = ok_to_merge_proximity(ctx, graph, c, merge_graph);
+	if (!ok)
+		printf("Does not optimize a proximity constraint.\n");
+	return ok;
 }
 
 /* Apply the schedule in "t_node" to the "n" rows starting at "first"
@@ -6562,6 +6578,8 @@ static isl_stat merge(isl_ctx *ctx, struct isl_clustering *c,
 	int cluster = -1;
 	isl_space *space;
 
+	printf("-- Merging:\n");
+
 	for (i = 0; i < c->n; ++i) {
 		struct isl_sched_node *node;
 
@@ -6580,6 +6598,7 @@ static isl_stat merge(isl_ctx *ctx, struct isl_clustering *c,
 				return isl_stat_error);
 		if (transform(ctx, &c->scc[i], node) < 0)
 			return isl_stat_error;
+		print_graph(ctx, c->scc+i);
 		c->scc_cluster[i] = cluster;
 	}
 
@@ -6700,6 +6719,11 @@ static int any_no_merge(struct isl_sched_graph *graph, int *scc_in_merge,
 static isl_stat merge_clusters_along_edge(isl_ctx *ctx,
 	struct isl_sched_graph *graph, int edge, struct isl_clustering *c)
 {
+	isl_printer * p = isl_printer_to_file(ctx, stdout);
+	printf("-- Trying to merge along edge: ");
+	isl_printer_print_map(p, graph->edge[edge].map); printf("\n");
+	isl_printer_free(p);
+
 	isl_bool merged;
 	int edge_weight = graph->edge[edge].weight;
 
@@ -6707,13 +6731,27 @@ static isl_stat merge_clusters_along_edge(isl_ctx *ctx,
 		return isl_stat_error;
 
 	if (any_no_merge(graph, c->scc_in_merge, &graph->edge[edge]))
+	{
+		printf("Not merging due to intermediate nodes.\n");
 		merged = isl_bool_false;
+	}
 	else
+	{
 		merged = try_merge(ctx, graph, c);
+		if (!merged)
+			printf("Not merging due to own constraints.\n");
+	}
 	if (merged < 0)
 		return isl_stat_error;
 	if (!merged && edge_weight == graph->edge[edge].weight)
+	{
+		printf("Can not merge.\n");
 		graph->edge[edge].no_merge = 1;
+	}
+	else if (!merged)
+	{
+		printf("Postponed.\n");
+	}
 
 	return isl_stat_ok;
 }
@@ -7184,4 +7222,21 @@ __isl_give isl_schedule *isl_union_set_compute_schedule(
 	sc = isl_schedule_constraints_set_proximity(sc, proximity);
 
 	return isl_schedule_constraints_compute_schedule(sc);
+}
+
+static void print_graph(isl_ctx * ctx, struct isl_sched_graph *graph)
+{
+	isl_printer * p = isl_printer_to_file(ctx, stdout);
+	int i;
+	for (i = 0; i < graph->n; ++i)
+	{
+		struct isl_sched_node * node = graph->node + i;
+
+		isl_map * sched = node_extract_schedule(node);
+		p = isl_printer_print_map(p, sched);
+		printf("\n");
+
+		isl_map_free(sched);
+	}
+	isl_printer_free(p);
 }
