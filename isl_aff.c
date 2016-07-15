@@ -5116,6 +5116,37 @@ __isl_give isl_union_pw_multi_aff *isl_union_pw_multi_aff_from_union_set(
 	return isl_union_pw_multi_aff_from_union_map(uset);
 }
 
+__isl_give isl_multi_aff *isl_multi_aff_from_mat(__isl_take isl_space *space,
+       __isl_take isl_mat *mat)
+{
+       int i, n_out;
+       isl_local_space *ls;
+       isl_multi_aff *ma;
+       isl_val *d;
+
+       n_out = isl_space_dim(space, isl_dim_out);
+       ma = isl_multi_aff_zero(isl_space_copy(space));
+       ls = isl_local_space_from_space(isl_space_domain(space));
+
+       d = isl_mat_get_element_val(mat, 0, 0);
+       for (i = 0; i < n_out; ++i) {
+               isl_vec *v;
+               isl_aff *aff;
+
+               v = isl_mat_get_row(mat, 1 + i);
+               v = isl_vec_insert_els(v, 0, 1);
+               v = isl_vec_set_element_val(v, 0, isl_val_copy(d));
+               aff = isl_aff_alloc_vec(isl_local_space_copy(ls), v);
+               ma = isl_multi_aff_set_aff(ma, i, aff);
+       }
+
+       isl_val_free(d);
+       isl_local_space_free(ls);
+       isl_mat_free(mat);
+
+       return ma;
+}
+
 /* Return the piecewise affine expression "set ? 1 : 0".
  */
 __isl_give isl_pw_aff *isl_set_indicator_function(__isl_take isl_set *set)

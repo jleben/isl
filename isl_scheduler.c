@@ -35,6 +35,8 @@
 #include <isl_val_private.h>
 #include <assert.h>
 
+static int clustering_debug_output = 0;
+
 /*
  * The scheduling algorithm implemented in this file was inspired by
  * Bondhugula et al., "Automatic Transformations for Communication-Minimized
@@ -5572,8 +5574,11 @@ static isl_stat clustering_init(isl_ctx *ctx, struct isl_clustering *c,
 			return isl_stat_error;
 		c->scc_cluster[i] = i;
 
-		printf("-- Scheduled partial graph:\n");
-		print_graph(ctx, c->scc+i);
+		if (clustering_debug_output)
+		{
+			printf("-- Scheduled partial graph:\n");
+			print_graph(ctx, c->scc+i);
+		}
 	}
 
 	return isl_stat_ok;
@@ -6313,6 +6318,78 @@ static isl_bool has_singular_src_or_dst(__isl_keep isl_map *map, int pos)
 	return single;
 }
 
+static isl_stat count_skewed_equalities(__isl_take isl_constraint *c,
+       void *user)
+{
+       int i, dim, m;
+       int *n = user;
+       isl_bool is_eq;
+
+       is_eq = isl_constraint_is_equality(c);
+       if (is_eq < 0 || !is_eq) {
+               isl_constraint_free(c);
+               return is_eq < 0 ? isl_stat_error : isl_stat_ok;
+       }
+
+       dim = isl_constraint_dim(c, isl_dim_set);
+       m = 0;
+       for (i = 0; i < dim; ++i) {
+               isl_bool involves;
+               involves = isl_constraint_involves_dims(c, isl_dim_set, i, 1);
+               if (involves < 0)
+                       break;
+               if (!involves)
+                       continue;
+               m++;
+               if (m >= 2)
+                       break;
+       }
+       isl_constraint_free(c);
+
+       if (i < dim && m < 2)
+               return isl_stat_error;
+       if (m >= 2)
+               (*n)++;
+       return isl_stat_ok;
+}
+
+static int n_skewed_equalities(__isl_keep isl_set *set)
+{
+       isl_basic_set *hull;
+       int n = 0;
+
+       hull = isl_set_affine_hull(isl_set_copy(set));
+       if (isl_basic_set_foreach_constraint(hull,
+                                           &count_skewed_equalities, &n) < 0)
+               n = -1;
+       isl_basic_set_free(hull);
+
+       return n;
+}
+
+static __isl_give isl_multi_aff *unskew_equalities(__isl_keep isl_set *set)
+{
+       isl_ctx *ctx;
+       isl_space *space;
+       isl_basic_set *hull;
+       isl_mat *eq, *T;
+       int dim;
+
+       hull = isl_set_affine_hull(isl_set_copy(set));
+       if (!hull)
+               return NULL;
+
+       ctx = isl_basic_set_get_ctx(hull);
+       dim = isl_basic_set_dim(hull, isl_dim_set);
+       eq = isl_mat_sub_alloc6(ctx, hull->eq, 0, hull->n_eq, 1, dim);
+       eq = isl_mat_left_hermite(eq, 0, &T, NULL);
+       isl_mat_free(eq);
+       isl_basic_set_free(hull);
+       T = isl_mat_lin_to_aff(T);
+       space = isl_space_map_from_set(isl_set_get_space(set));
+       return isl_multi_aff_from_mat(space, T);
+}
+
 /* Does the edge "edge" from "graph" have bounded dependence distances
  * in the merged graph "merge_graph" of a selection of clusters in "c"?
  *
@@ -6343,10 +6420,12 @@ static isl_bool has_bounded_distances(isl_ctx *ctx, struct isl_sched_edge *edge,
 	struct isl_sched_graph *graph, struct isl_clustering *c,
 	struct isl_sched_graph *merge_graph)
 {
-	int i, n, n_slack;
+	int i, n, n_slack, n_skewed;
 	isl_bool bounded;
 	isl_map *map, *t;
+	isl_multi_aff *ma;
 	isl_set *dist;
+	isl_printer *p = isl_printer_to_file(ctx, stdout);
 
 	map = isl_map_copy(edge->map);
 	t = extract_node_transformation(ctx, edge->src, c, merge_graph);
@@ -6355,15 +6434,48 @@ static isl_bool has_bounded_distances(isl_ctx *ctx, struct isl_sched_edge *edge,
 	map = isl_map_apply_range(map, t);
 	dist = isl_map_deltas(isl_map_copy(map));
 
+	if (clustering_debug_output)
+	{
+		printf("Checking distance in schedule:\n");
+		isl_printer_print_map(p,map);
+		printf("\n");
+	}
+
+
+	n_skewed = n_skewed_equalities(dist);
+	if (n_skewed < 0)
+			goto error;
+	if (n_skewed > 0) {
+			ma = unskew_equalities(dist);
+			map = isl_map_preimage_domain_multi_aff(map,
+													isl_multi_aff_copy(ma));
+			map = isl_map_preimage_range_multi_aff(map,
+													isl_multi_aff_copy(ma));
+			dist = isl_set_preimage_multi_aff(dist, ma);
+	}
+
+	if (clustering_debug_output)
+	{
+		printf("Skewed schedule:\n");
+		isl_printer_print_map(p,map);
+		printf("\n");
+	}
+
 	bounded = isl_bool_true;
 	n = isl_set_dim(dist, isl_dim_set);
 	n_slack = n - edge->weight;
 	if (edge->weight < 0)
 		n_slack -= graph->max_weight + 1;
+
+	if (clustering_debug_output)
+		printf("slack = %d\n", n_slack);
+
 	for (i = 0; i < n; ++i) {
 		isl_bool bounded_i, singular_i;
 
 		bounded_i = distance_is_bounded(dist, i);
+		if (clustering_debug_output)
+			printf("dimension %d bounded = %d\n", i, bounded_i);
 		if (bounded_i < 0)
 			goto error;
 		if (bounded_i)
@@ -6373,23 +6485,29 @@ static isl_bool has_bounded_distances(isl_ctx *ctx, struct isl_sched_edge *edge,
 		n_slack--;
 		if (n_slack < 0)
 			break;
+#if 0
 		singular_i = has_singular_src_or_dst(map, i);
+		printf("dimension %d singular = %d\n", i, singular_i);
 		if (singular_i < 0)
 			goto error;
 		if (singular_i)
 			continue;
 		bounded = isl_bool_false;
 		break;
+#endif
 	}
 	if (!bounded && i >= n && edge->weight >= 0)
 		edge->weight -= graph->max_weight + 1;
 	isl_map_free(map);
 	isl_set_free(dist);
+	isl_printer_free(p);
 
 	return bounded;
 error:
 	isl_map_free(map);
 	isl_set_free(dist);
+	isl_printer_free(p);
+
 	return isl_bool_error;
 }
 
@@ -6455,14 +6573,16 @@ static isl_bool ok_to_merge(isl_ctx *ctx, struct isl_sched_graph *graph,
 {
 	if (merge_graph->n_total_row == merge_graph->band_start)
 	{
-		printf("Current band empty.\n");
+		if (clustering_debug_output)
+			printf("Current band empty.\n");
 		return isl_bool_false;
 	}
 
 	if (isl_options_get_schedule_maximize_band_depth(ctx) &&
 	    merge_graph->n_total_row < merge_graph->maxvar)
 	{
-		printf("Violates maximizing band depth.\n");
+		if (clustering_debug_output)
+			printf("Violates maximizing band depth.\n");
 		return isl_bool_false;
 	}
 
@@ -6470,14 +6590,14 @@ static isl_bool ok_to_merge(isl_ctx *ctx, struct isl_sched_graph *graph,
 		isl_bool ok;
 
 		ok = ok_to_merge_coincident(c, merge_graph);
-		if (!ok)
+		if (!ok && clustering_debug_output)
 			printf("Violates maximizing coincidence.\n");
 		if (ok < 0 || !ok)
 			return ok;
 	}
 
 	isl_bool ok = ok_to_merge_proximity(ctx, graph, c, merge_graph);
-	if (!ok)
+	if (!ok && clustering_debug_output)
 		printf("Does not optimize a proximity constraint.\n");
 	return ok;
 }
@@ -6578,7 +6698,8 @@ static isl_stat merge(isl_ctx *ctx, struct isl_clustering *c,
 	int cluster = -1;
 	isl_space *space;
 
-	printf("-- Merging:\n");
+	if (clustering_debug_output)
+		printf("-- Merging:\n");
 
 	for (i = 0; i < c->n; ++i) {
 		struct isl_sched_node *node;
@@ -6598,7 +6719,8 @@ static isl_stat merge(isl_ctx *ctx, struct isl_clustering *c,
 				return isl_stat_error);
 		if (transform(ctx, &c->scc[i], node) < 0)
 			return isl_stat_error;
-		print_graph(ctx, c->scc+i);
+		if (clustering_debug_output)
+			print_graph(ctx, c->scc+i);
 		c->scc_cluster[i] = cluster;
 	}
 
@@ -6720,8 +6842,12 @@ static isl_stat merge_clusters_along_edge(isl_ctx *ctx,
 	struct isl_sched_graph *graph, int edge, struct isl_clustering *c)
 {
 	isl_printer * p = isl_printer_to_file(ctx, stdout);
-	printf("-- Trying to merge along edge: ");
-	isl_printer_print_map(p, graph->edge[edge].map); printf("\n");
+
+	if (clustering_debug_output)
+	{
+		printf("-- Trying to merge along edge: ");
+		isl_printer_print_map(p, graph->edge[edge].map); printf("\n");
+	}
 	isl_printer_free(p);
 
 	isl_bool merged;
@@ -6732,25 +6858,28 @@ static isl_stat merge_clusters_along_edge(isl_ctx *ctx,
 
 	if (any_no_merge(graph, c->scc_in_merge, &graph->edge[edge]))
 	{
-		printf("Not merging due to intermediate nodes.\n");
+		if (clustering_debug_output)
+			printf("Not merging due to intermediate nodes.\n");
 		merged = isl_bool_false;
 	}
 	else
 	{
 		merged = try_merge(ctx, graph, c);
-		if (!merged)
+		if (!merged && clustering_debug_output)
 			printf("Not merging due to own constraints.\n");
 	}
 	if (merged < 0)
 		return isl_stat_error;
 	if (!merged && edge_weight == graph->edge[edge].weight)
 	{
-		printf("Can not merge.\n");
+		if (clustering_debug_output)
+			printf("Can not merge.\n");
 		graph->edge[edge].no_merge = 1;
 	}
 	else if (!merged)
 	{
-		printf("Postponed.\n");
+		if (clustering_debug_output)
+			printf("Postponed.\n");
 	}
 
 	return isl_stat_ok;
