@@ -5442,7 +5442,8 @@ static __isl_give isl_union_map *collect_cluster_map(isl_ctx *ctx,
  * that are not isl_edge_condition or isl_edge_conditional_validity.
  */
 static __isl_give isl_schedule_constraints *add_non_conditional_constraints(
-	struct isl_sched_edge *edge, __isl_keep isl_union_map *umap,
+	struct isl_sched_edge *edge, struct isl_clustering *c,
+	__isl_keep isl_union_map *umap,
 	__isl_take isl_schedule_constraints *sc)
 {
 	enum isl_edge_type t;
@@ -5454,6 +5455,11 @@ static __isl_give isl_schedule_constraints *add_non_conditional_constraints(
 		if (t == isl_edge_condition ||
 		    t == isl_edge_conditional_validity)
 			continue;
+#if 1
+		if (t == isl_edge_proximity &&
+		    c->scc_cluster[edge->src->scc] == c->scc_cluster[edge->dst->scc])
+			continue;
+#endif
 		if (!is_type(edge, t))
 			continue;
 		sc->constraint[t] = isl_union_map_union(sc->constraint[t],
@@ -5511,7 +5517,8 @@ static __isl_give isl_schedule_constraints *add_conditional_constraints(
  * This mapping can then be applied to the pair of domains.
  */
 static __isl_give isl_schedule_constraints *collect_edge_constraints(
-	struct isl_sched_edge *edge, __isl_keep isl_union_map *cluster_map,
+	struct isl_sched_edge *edge, struct isl_clustering *c,
+	__isl_keep isl_union_map *cluster_map,
 	__isl_take isl_schedule_constraints *sc)
 {
 	isl_union_map *umap;
@@ -5527,7 +5534,7 @@ static __isl_give isl_schedule_constraints *collect_edge_constraints(
 				isl_union_map_copy(cluster_map));
 	umap = isl_union_map_apply_range(umap,
 				isl_union_map_copy(cluster_map));
-	sc = add_non_conditional_constraints(edge, umap, sc);
+	sc = add_non_conditional_constraints(edge, c, umap, sc);
 	isl_union_map_free(umap);
 
 	if (!sc || (!is_condition(edge) && !is_conditional_validity(edge)))
@@ -5555,7 +5562,7 @@ static __isl_give isl_schedule_constraints *collect_edge_constraints(
  * belong to SCCs that are marked for merging in "scc_in_merge".
  */
 static __isl_give isl_schedule_constraints *collect_constraints(
-	struct isl_sched_graph *graph, int *scc_in_merge,
+	struct isl_sched_graph *graph, struct isl_clustering *c,
 	__isl_keep isl_union_map *cluster_map,
 	__isl_take isl_schedule_constraints *sc)
 {
@@ -5564,11 +5571,11 @@ static __isl_give isl_schedule_constraints *collect_constraints(
 	for (i = 0; i < graph->n_edge; ++i) {
 		struct isl_sched_edge *edge = &graph->edge[i];
 
-		if (!scc_in_merge[edge->src->scc])
+		if (!c->scc_in_merge[edge->src->scc])
 			continue;
-		if (!scc_in_merge[edge->dst->scc])
+		if (!c->scc_in_merge[edge->dst->scc])
 			continue;
-		sc = collect_edge_constraints(edge, cluster_map, sc);
+		sc = collect_edge_constraints(edge, c, cluster_map, sc);
 	}
 
 	return sc;
@@ -5598,7 +5605,7 @@ static isl_stat init_merge_graph(isl_ctx *ctx, struct isl_sched_graph *graph,
 	if (!sc)
 		return isl_stat_error;
 	cluster_map = collect_cluster_map(ctx, graph, c);
-	sc = collect_constraints(graph, c->scc_in_merge, cluster_map, sc);
+	sc = collect_constraints(graph, c, cluster_map, sc);
 	isl_union_map_free(cluster_map);
 
 	r = graph_init(merge_graph, sc);
@@ -6040,8 +6047,13 @@ static isl_bool ok_to_merge(isl_ctx *ctx, struct isl_sched_graph *graph,
 		if (ok < 0 || !ok)
 			return ok;
 	}
-
-	return ok_to_merge_proximity(ctx, graph, c, merge_graph);
+#if 0
+	isl_bool ok = ok_to_merge_proximity(ctx, graph, c, merge_graph);
+	if (!ok && clustering_debug_output)
+		printf("Does not optimize a proximity constraint.\n");
+	return ok;
+#endif
+	return isl_bool_true;
 }
 
 /* Apply the schedule in "t_node" to the "n" rows starting at "first"
