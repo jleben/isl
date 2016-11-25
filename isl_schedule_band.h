@@ -109,6 +109,9 @@ __isl_give isl_schedule_band *isl_schedule_band_point(
 __isl_give isl_schedule_band *isl_schedule_band_shift(
 	__isl_take isl_schedule_band *band,
 	__isl_take isl_multi_union_pw_aff *shift);
+__isl_give isl_schedule_band *isl_schedule_band_apply(
+		__isl_take isl_schedule_band *band,
+		__isl_take isl_multi_aff *ma);
 __isl_give isl_schedule_band *isl_schedule_band_drop(
 	__isl_take isl_schedule_band *band, int pos, int n);
 __isl_give isl_schedule_band *isl_schedule_band_gist(
