@@ -1974,6 +1974,16 @@ __isl_give isl_schedule_node *isl_schedule_node_band_split(
 	return isl_schedule_node_graft_tree(node, tree);
 }
 
+__isl_give isl_schedule_node *isl_schedule_node_band_apply(
+		__isl_take isl_schedule_node *node, __isl_take isl_multi_aff *ma)
+{
+	// FIXME: check if input valid
+	isl_schedule_tree *tree;
+	tree = isl_schedule_node_get_tree(node);
+	tree = isl_schedule_tree_band_apply(tree, ma);
+	return isl_schedule_node_graft_tree(node, tree);
+}
+
 /* Return the context of the context node "node".
  */
 __isl_give isl_set *isl_schedule_node_context_get_context(

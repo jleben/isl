@@ -2097,6 +2097,30 @@ error:
 	return NULL;
 }
 
+__isl_give isl_schedule_tree *isl_schedule_tree_band_apply(
+		__isl_take isl_schedule_tree *tree, __isl_take isl_multi_aff *ma)
+{
+	if (!tree || !ma)
+		goto error;
+	if (tree->type != isl_schedule_node_band)
+		isl_die(isl_schedule_tree_get_ctx(tree), isl_error_invalid,
+			"not a band node", goto error);
+
+	tree = isl_schedule_tree_cow(tree);
+	if (!tree)
+		goto error;
+
+	tree->band = isl_schedule_band_apply(tree->band, ma);
+	if (!tree->band)
+		return isl_schedule_tree_free(tree);
+
+	return tree;
+error:
+	isl_schedule_tree_free(tree);
+	isl_multi_aff_free(ma);
+	return NULL;
+}
+
 /* Given two trees with sequence roots, replace the child at position
  * "pos" of "tree" with the children of "child".
  */
@@ -2309,6 +2333,18 @@ error:
 	isl_schedule_tree_free(child);
 	isl_schedule_tree_free(tree);
 	return NULL;
+}
+
+__isl_give isl_schedule_tree *isl_schedule_tree_band_permute(
+		__isl_take isl_schedule_tree *tree, int *order)
+{
+
+	if (!tree)
+		return NULL;
+	if (tree->type != isl_schedule_node_band)
+		isl_die(isl_schedule_tree_get_ctx(tree), isl_error_invalid,
+			"not a band node", return isl_schedule_tree_free(tree));
+
 }
 
 /* Attach "tree2" at each of the leaves of "tree1".

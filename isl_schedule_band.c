@@ -1056,6 +1056,22 @@ error:
 	return NULL;
 }
 
+__isl_give isl_schedule_band *isl_schedule_band_apply(
+	__isl_take isl_schedule_band *band, __isl_take isl_multi_aff *ma)
+{
+	band = isl_schedule_band_cow(band);
+	if (!band || !ma)
+		goto error;
+	band->mupa = isl_multi_union_pw_aff_apply_multi_aff(band->mupa, ma);
+	if (!band->mupa)
+		return isl_schedule_band_free(band);
+	return band;
+error:
+	isl_schedule_band_free(band);
+	isl_multi_aff_free(ma);
+	return NULL;
+}
+
 /* Given the schedule of a band, construct the corresponding
  * schedule for the tile loops based on the given tile sizes
  * and return the result.

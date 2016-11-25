@@ -231,6 +231,8 @@ __isl_give isl_schedule_tree *isl_schedule_tree_band_tile(
 __isl_give isl_schedule_tree *isl_schedule_tree_band_shift(
 	__isl_take isl_schedule_tree *tree,
 	__isl_take isl_multi_union_pw_aff *shift);
+__isl_give isl_schedule_tree *isl_schedule_tree_band_apply(
+		__isl_take isl_schedule_tree *tree, __isl_take isl_multi_aff *ma);
 __isl_give isl_schedule_tree *isl_schedule_tree_band_split(
 	__isl_take isl_schedule_tree *tree, int pos, int depth);
 __isl_give isl_schedule_tree *isl_schedule_tree_band_gist(
