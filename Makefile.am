@@ -14,6 +14,9 @@ noinst_PROGRAMS = isl_test isl_polyhedron_sample isl_pip \
 	isl_closure isl_bound isl_schedule isl_codegen isl_test_int
 TESTS = isl_test codegen_test.sh pip_test.sh bound_test.sh isl_test_int
 
+#EXTRA_LIBS =  /usr/lib/x86_64-linux-gnu/libm.so /usr/lib/x86_64-linux-gnu/libdl.so /usr/lib/liblpsolve55_pic.a
+EXTRA_LIBS = -llpsolve55_pic -lm  -ldl -lcolamd
+
 if IMATH_FOR_MP
 
 MP_SRC = \
@@ -189,63 +192,63 @@ libisl_la_SOURCES = \
 	isl_vertices_private.h \
 	isl_vertices.c \
 	isl_yaml.h
-libisl_la_LIBADD = @MP_LIBS@
+libisl_la_LIBADD = @MP_LIBS@ $(EXTRA_LIBS)
 libisl_la_LDFLAGS = -version-info @versioninfo@ \
 	@MP_LDFLAGS@
 
 isl_test_LDFLAGS = @MP_LDFLAGS@
-isl_test_LDADD = libisl.la @MP_LIBS@
+isl_test_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 
 isl_test_int_LDFLAGS = @MP_LDFLAGS@
-isl_test_int_LDADD = libisl.la @MP_LIBS@
+isl_test_int_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 
 if IMATH_FOR_MP
 isl_test_imath_LDFLAGS = @MP_LDFLAGS@
-isl_test_imath_LDADD = libisl.la @MP_LIBS@
+isl_test_imath_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 endif
 
-isl_polyhedron_sample_LDADD = libisl.la
+isl_polyhedron_sample_LDADD = libisl.la $(EXTRA_LIBS)
 isl_polyhedron_sample_SOURCES = \
 	polyhedron_sample.c
 
 isl_pip_LDFLAGS = @MP_LDFLAGS@
-isl_pip_LDADD = libisl.la @MP_LIBS@
+isl_pip_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 isl_pip_SOURCES = \
 	pip.c
 
 isl_schedule_LDFLAGS = @MP_LDFLAGS@
-isl_schedule_LDADD = libisl.la @MP_LIBS@
+isl_schedule_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 isl_schedule_SOURCES = \
 	schedule.c
 
 isl_codegen_LDFLAGS = @MP_LDFLAGS@
-isl_codegen_LDADD = libisl.la @MP_LIBS@
+isl_codegen_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 isl_codegen_SOURCES = \
 	codegen.c
 
 isl_bound_LDFLAGS = @MP_LDFLAGS@
-isl_bound_LDADD = libisl.la @MP_LIBS@
+isl_bound_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 isl_bound_SOURCES = \
 	bound.c
 
 isl_polyhedron_minimize_LDFLAGS = @MP_LDFLAGS@
-isl_polyhedron_minimize_LDADD = libisl.la @MP_LIBS@
+isl_polyhedron_minimize_LDADD = libisl.la @MP_LIBS@ $(EXTRA_LIBS)
 isl_polyhedron_minimize_SOURCES = \
 	polyhedron_minimize.c
 
-isl_polytope_scan_LDADD = libisl.la
+isl_polytope_scan_LDADD = libisl.la $(EXTRA_LIBS)
 isl_polytope_scan_SOURCES = \
 	polytope_scan.c
 
-isl_polyhedron_detect_equalities_LDADD = libisl.la
+isl_polyhedron_detect_equalities_LDADD = libisl.la $(EXTRA_LIBS)
 isl_polyhedron_detect_equalities_SOURCES = \
 	polyhedron_detect_equalities.c
 
-isl_cat_LDADD = libisl.la
+isl_cat_LDADD = libisl.la $(EXTRA_LIBS)
 isl_cat_SOURCES = \
 	cat.c
 
-isl_closure_LDADD = libisl.la
+isl_closure_LDADD = libisl.la $(EXTRA_LIBS)
 isl_closure_SOURCES = \
 	closure.c
 

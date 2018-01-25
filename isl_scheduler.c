@@ -37,6 +37,7 @@
 #include <isl_morph.h>
 #include <isl/ilp.h>
 #include <isl_val_private.h>
+#include <lpsolve/lp_lib.h>
 
 /*
  * The scheduling algorithm implemented in this file was inspired by
@@ -2514,6 +2515,269 @@ static int needs_row(struct isl_sched_graph *graph, struct isl_sched_node *node)
 	return node->nvar - node->rank >= graph->maxvar - graph->n_row;
 }
 
+static isl_vec * solve_lp_lpsolve(struct isl_sched_graph *graph)
+{
+    isl_ctx * ctx;
+    isl_vec *sol;
+
+    ctx = isl_basic_set_get_ctx(graph->lp);
+
+    isl_printer * printer = isl_printer_to_file(ctx, stdout);
+
+    int solved = 0;
+    int optimal_distance = 0;
+
+    while(solved < 2)
+    {
+        int num_decision_vars = 0;
+
+        for (int i = 0; i < graph->n; ++i)
+        {
+            struct isl_sched_node *node = &graph->node[i];
+
+            if (needs_row(graph, node) && (node->nvar - node->rank) > 0)
+                ++num_decision_vars;
+        }
+
+        // NOTE: isl_basic_set_total_dim does NOT include constant
+        int nvar = isl_basic_set_total_dim(graph->lp);
+
+        printf("-- %d var, %d decision var\n", nvar, num_decision_vars);
+
+        // Create LP
+
+        lprec * lp = make_lp(0, nvar + num_decision_vars);
+        for (int i = 1; i <= nvar; ++i)
+            set_int(lp, i, 1);
+        for (int i = nvar + 1; i <= nvar + num_decision_vars; ++i)
+            set_binary(lp, i, 1);
+
+        // Create temp storage
+
+        REAL * row = (REAL*) malloc((nvar + num_decision_vars) * sizeof(REAL));
+        int * indices = (int*) malloc((nvar + num_decision_vars) * sizeof(int));
+
+        set_add_rowmode(lp, TRUE);
+
+        // Add equalities
+
+        for(int i = 0; i < graph->lp->n_eq; ++i)
+        {
+            isl_int * coefs = graph->lp->eq[i];
+
+            // NOTE: Constant comes first in coefs;
+            for (int j = 0; j < nvar; ++j)
+            {
+                indices[j] = j+1;
+                row[j] = isl_int_get_si(coefs[j+1]);
+            }
+
+            if(!add_constraintex(lp, nvar, row, indices, EQ, -isl_int_get_si(coefs[0])))
+            {
+                printf("Couldn't add constraint\n");
+                abort();
+            }
+        }
+
+        // Add inequalities
+
+        for(int i = 0; i < graph->lp->n_ineq; ++i)
+        {
+            isl_int * coefs = graph->lp->ineq[i];
+
+            // NOTE: Constant comes first in ineq;
+            for (int j = 0; j < nvar; ++j)
+            {
+                indices[j] = j+1;
+                row[j] = isl_int_get_si(coefs[j+1]);
+            }
+
+            if(!add_constraintex(lp, nvar, row, indices, GE, -isl_int_get_si(coefs[0])))
+            {
+                printf("Couldn't add constraint\n");
+                abort();
+            }
+        }
+#if 1
+        // For each node, a set of variables must be non-zero.
+        // Each variable is represented as v = p - n where
+        // both n and p are positive.
+
+        int decision_var_index = 1;
+
+        for (int i = 0; i < graph->n; ++i)
+        {
+            struct isl_sched_node *node = &graph->node[i];
+
+            if (!needs_row(graph, node))
+                continue;
+
+            int skip = node->rank;
+            int start = node_var_coef_offset(node) + 2 * skip + 1;
+            int count = (node->nvar - skip);
+
+            if (count < 1)
+                continue;
+
+            // x_i <= 4, for all i
+
+            for (int j = 0; j < 2 * count; ++j)
+            {
+                set_upbo(lp, start + j, 4);
+            }
+
+            // sum_i(5^i * x_i) >= 1 - 5^count * d
+            // sum_i(5^i * x_i) + 5^count * d >= 1
+
+            {
+                int k = 0;
+                for (int j = 0; j < count; ++j)
+                {
+                    int c = pow(5, j);
+
+                    indices[k] = start + k;
+                    row[k] = -c;
+                    ++k;
+
+                    indices[k] = start + k;
+                    row[k] = c;
+                    ++k;
+                }
+
+                indices[k] = nvar + decision_var_index;
+                row[k] = pow(5, count);
+                ++k;
+
+                add_constraintex(lp, k, row, indices, GE, 1);
+            }
+
+            // - sum_i(5^i * x_i) >= 1 - (1 - d) * 5^count
+            // - sum_i(5^i * x_i) >= 1 - (1 - d) * 5^count
+            // - sum_i(5^i * x_i) >= 1 - 5^count + 5^count * d
+            // - sum_i(5^i * x_i) - 5^count * d >= 1 - 5^count
+
+            {
+                int k = 0;
+                for (int j = 0; j < count; ++j)
+                {
+                    int c = pow(5, j);
+
+                    indices[k] = start + k;
+                    row[k] = c;
+
+                    ++k;
+
+                    indices[k] = start + k;
+                    row[k] = -c;
+                    ++k;
+                }
+
+                indices[k] = nvar + decision_var_index;
+                row[k] = -pow(5, count);
+                ++k;
+
+                add_constraintex(lp, k, row, indices, GE, 1 - pow(5, count));
+            }
+
+            ++decision_var_index;
+        }
+#endif
+        set_add_rowmode(lp, FALSE);
+
+        if (solved == 0)
+        {
+            printf("\nMinimizing bound on distances...\n");
+
+            // Set objective function
+            // Minimize var2 (constant bound on distances)
+            indices[0] = 2;
+            row[0] = 1;
+
+            if(!set_obj_fnex(lp, 1, row, indices))
+            {
+                printf("Couldn't set objective function\n");
+                abort();
+            }
+
+            set_minim(lp);
+        }
+        else
+        {
+            printf("\nMinimizing sum of coefficients...\n");
+
+            // Set distance variable to optimum
+            set_bounds(lp, 2, optimal_distance, optimal_distance);
+
+            // Set objective function
+            indices[0] = 4;
+            row[0] = 1;
+
+            if(!set_obj_fnex(lp, 1, row, indices))
+            {
+                printf("Couldn't set objective function\n");
+                abort();
+            }
+
+            set_minim(lp);
+        }
+
+        write_LP(lp, stdout);
+
+        //set_verbose(lp, IMPORTANT);
+
+        //set_mip_gap(lp, TRUE, 0.9);
+        //set_break_at_value(lp, 2.0);
+        //set_bb_floorfirst(lp, BRANCH_CEILING);
+        set_bb_depthlimit(lp, -3);
+
+        int ret = solve(lp);
+
+        printf("\nSolution type = %d\n", ret);
+
+        if (ret != 0)
+        {
+            if (solved > 0)
+            {
+                printf("Failed to minimize coefficients\n");
+                abort();
+            }
+
+            sol = isl_vec_alloc(ctx, 0);
+            break;
+        }
+
+        if (solved == 0)
+        {
+            optimal_distance = round((float) get_objective(lp));
+            printf("Optimal distance: %d\n", optimal_distance);
+        }
+
+        get_variables(lp, row);
+
+        sol = isl_vec_alloc(ctx, nvar + 1);
+        sol = isl_vec_set_element_si(sol, 0, 1);
+        for (int j = 0; j < nvar; ++j)
+            sol = isl_vec_set_element_si(sol, j+1, (int) row[j]);
+
+        printf("\nSolution:\n");
+        isl_printer_print_vec(printer, sol);
+        printf("\n");
+
+        if (solved == 0)
+        {
+            isl_vec_free(sol);
+        }
+
+        delete_lp(lp);
+
+        ++solved;
+    }
+
+    isl_printer_free(printer);
+
+    return sol;
+}
+
 /* Solve the ILP problem constructed in setup_lp.
  * For each node such that all the remaining rows of its schedule
  * need to be non-trivial, we construct a non-triviality region.
@@ -2528,22 +2792,74 @@ static int needs_row(struct isl_sched_graph *graph, struct isl_sched_node *node)
  */
 static __isl_give isl_vec *solve_lp(struct isl_sched_graph *graph)
 {
+    printf("\n-------------- LP -------------\n");
+
 	int i;
+    isl_ctx * ctx;
 	isl_vec *sol;
 	isl_basic_set *lp;
 
-	for (i = 0; i < graph->n; ++i) {
-		struct isl_sched_node *node = &graph->node[i];
-		int skip = node->rank;
-		graph->region[i].pos = node_var_coef_offset(node) + 2 * skip;
-		if (needs_row(graph, node))
-			graph->region[i].len = 2 * (node->nvar - skip);
-		else
-			graph->region[i].len = 0;
-	}
-	lp = isl_basic_set_copy(graph->lp);
-	sol = isl_tab_basic_set_non_trivial_lexmin(lp, 2, graph->n,
-				       graph->region, &check_conflict, graph);
+    ctx = isl_basic_set_get_ctx(graph->lp);
+
+    isl_printer * printer = isl_printer_to_file(ctx, stdout);
+
+    graph->lp = isl_basic_set_detect_equalities(graph->lp);
+
+    //isl_printer_print_basic_set(printer, graph->lp);
+    //printf("\n");
+
+    int use_lpsolve = 1;
+
+    if (use_lpsolve)
+    {
+        sol = solve_lp_lpsolve(graph);
+    }
+    else
+    {
+        for (i = 0; i < graph->n; ++i) {
+            struct isl_sched_node *node = &graph->node[i];
+            int skip = node->rank;
+            graph->region[i].pos = node_var_coef_offset(node) + 2 * skip;
+            if (needs_row(graph, node))
+                graph->region[i].len = 2 * (node->nvar - skip);
+            else
+                graph->region[i].len = 0;
+
+            if (graph->region[i].len > 0)
+                printf("Region start = %d, len %d\n", graph->region[i].pos, graph->region[i].len);
+        }
+
+        lp = isl_basic_set_copy(graph->lp);
+
+        sol = isl_tab_basic_set_non_trivial_lexmin(lp, 2, graph->n,
+                                                   graph->region, &check_conflict, graph);
+
+        printf("\nISL solution:\n");
+        isl_printer_print_vec(printer, sol);
+        printf("\n");
+
+        if (sol && sol->size)
+        {
+            for (i = 0; i < graph->n; ++i) {
+                struct isl_sched_node *node = &graph->node[i];
+                int skip = node->rank;
+                int start = node_var_coef_offset(node) + 2 * skip;
+                if (needs_row(graph, node))
+                {
+                    int count = 2 * (node->nvar - skip);
+                    for (int i = 0; i < count; ++i)
+                    {
+                        isl_val * val = isl_vec_get_element_val(sol, start + i + 1);
+                        printf("%d = %ld\n", start + i, isl_val_get_num_si(val));
+                        isl_val_free(val);
+                    }
+                }
+            }
+        }
+    }
+
+    isl_printer_free(printer);
+
 	return sol;
 }
 
