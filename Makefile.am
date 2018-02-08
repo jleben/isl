@@ -15,7 +15,7 @@ noinst_PROGRAMS = isl_test isl_polyhedron_sample isl_pip \
 TESTS = isl_test codegen_test.sh pip_test.sh bound_test.sh isl_test_int
 
 #EXTRA_LIBS =  /usr/lib/x86_64-linux-gnu/libm.so /usr/lib/x86_64-linux-gnu/libdl.so /usr/lib/liblpsolve55_pic.a
-EXTRA_LIBS = -llpsolve55_pic -lm  -ldl -lcolamd
+EXTRA_LIBS = -L/home/jakob/app/gurobi752/linux64/lib -lgurobi75 -lglpk -llpsolve55_pic -lm  -ldl -lcolamd -lgmp
 
 if IMATH_FOR_MP
 

@@ -38,6 +38,8 @@
 #include <isl/ilp.h>
 #include <isl_val_private.h>
 #include <lpsolve/lp_lib.h>
+#include <glpk.h>
+#include </home/jakob/app/gurobi752/linux64/include/gurobi_c.h>
 
 /*
  * The scheduling algorithm implemented in this file was inspired by
@@ -2721,20 +2723,23 @@ static isl_vec * solve_lp_lpsolve(struct isl_sched_graph *graph)
             set_minim(lp);
         }
 
-        write_LP(lp, stdout);
+        //write_LP(lp, stdout);
 
         //set_verbose(lp, IMPORTANT);
 
         //set_mip_gap(lp, TRUE, 0.9);
         //set_break_at_value(lp, 2.0);
         //set_bb_floorfirst(lp, BRANCH_CEILING);
-        set_bb_depthlimit(lp, -3);
+        if (solved == 0)
+            set_bb_depthlimit(lp, -50);
+        else
+            set_bb_depthlimit(lp, -3);
 
         int ret = solve(lp);
 
         printf("\nSolution type = %d\n", ret);
 
-        if (ret != 0)
+        if (ret == 2)
         {
             if (solved > 0)
             {
@@ -2744,6 +2749,10 @@ static isl_vec * solve_lp_lpsolve(struct isl_sched_graph *graph)
 
             sol = isl_vec_alloc(ctx, 0);
             break;
+        }
+        else if (ret != 0)
+        {
+            abort();
         }
 
         if (solved == 0)
@@ -2778,6 +2787,553 @@ static isl_vec * solve_lp_lpsolve(struct isl_sched_graph *graph)
     return sol;
 }
 
+struct glp_constraint
+{
+    double * coef;
+    int * idx;
+    int count;
+};
+
+static void glp_constraint_init(struct glp_constraint * c, int max_var_count)
+{
+    c->coef = (double*) malloc (max_var_count * sizeof(double) + 1);
+    c->idx = (int*) malloc (max_var_count * sizeof(int) + 1);
+    c->count = 0;
+}
+
+static void glp_constraint_reset(struct glp_constraint * c)
+{
+    c->count = 0;
+}
+
+static void glp_constraint_add(struct glp_constraint * c, int var, double coef)
+{
+    ++c->count;
+    c->idx[c->count] = var;
+    c->coef[c->count] = coef;
+}
+
+
+static void glp_add_constraint(glp_prob * lp, struct glp_constraint * c, int type, double lb, double ub)
+{
+    glp_add_rows(lp, 1);
+
+    int row = glp_get_num_rows(lp);
+
+    glp_set_mat_row(lp, row, c->count, c->idx, c->coef);
+
+    glp_set_row_bnds(lp, row, type, lb, ub);
+}
+
+static void glp_constraint_free(struct glp_constraint * c)
+{
+    free(c->coef);
+    free(c->idx);
+}
+
+static void glp_print_mip_error(int error)
+{
+    switch(error)
+    {
+    case GLP_EBOUND: printf("GLP_EBOUND\n"); break;
+    case GLP_EROOT: printf("GLP_EROOT\n"); break;
+    case GLP_ENOPFS: printf("GLP_ENOPFS\n"); break;
+    case GLP_ENODFS: printf("GLP_ENODFS\n"); break;
+    case GLP_EFAIL: printf("GLP_EFAIL\n"); break;
+    case GLP_EMIPGAP: printf("GLP_EMIPGAP\n"); break;
+    case GLP_ETMLIM: printf("GLP_ETMLIM\n"); break;
+    case GLP_ESTOP: printf("GLP_ESTOP\n"); break;
+    default: printf("Unknown error\n");
+    }
+}
+
+static void glp_print_mip_status(int status)
+{
+    switch(status)
+    {
+    case GLP_UNDEF:
+        printf("undefined\n"); break;
+    case GLP_OPT:
+        printf("optimal\n"); break;
+    case GLP_FEAS:
+        printf("feasible\n"); break;
+    case GLP_NOFEAS:
+        printf("no feasible\n"); break;
+    default:
+        printf("unknown status\n");
+    }
+}
+
+static isl_vec * solve_lp_glpk(struct isl_sched_graph *graph, isl_vec * isl_solution)
+{
+    printf("\n... GLPK ...\n");
+
+    isl_ctx * ctx;
+    isl_vec * sol;
+
+    ctx = isl_basic_set_get_ctx(graph->lp);
+
+    //isl_printer * printer = isl_printer_to_file(ctx, stdout);
+
+    int num_var = 0;
+    int num_decision_var = 0;
+
+    num_var = isl_basic_set_total_dim(graph->lp);
+
+    for (int i = 0; i < graph->n; ++i)
+    {
+        struct isl_sched_node *node = &graph->node[i];
+
+        if (needs_row(graph, node) && (node->nvar - node->rank) > 0)
+            ++num_decision_var;
+    }
+
+    glp_prob * lp = glp_create_prob();
+
+    glp_add_cols(lp, num_var + num_decision_var);
+
+    for (int i = 0; i < num_var; ++i)
+    {
+        glp_set_col_kind(lp, i+1, GLP_IV);
+        glp_set_col_bnds(lp, i+1, GLP_LO, 0, 0);
+    }
+
+    for (int i = num_var; i < num_var + num_decision_var; ++i)
+    {
+        glp_set_col_kind(lp, i+1, GLP_BV);
+    }
+
+
+    struct glp_constraint constraint;
+    glp_constraint_init(&constraint, num_var + num_decision_var);
+
+    // Add equalities
+
+    for(int i = 0; i < graph->lp->n_eq; ++i)
+    {
+        // NOTE: Constant comes first in src;
+        isl_int * src = graph->lp->eq[i];
+
+        glp_constraint_reset(&constraint);
+
+        for (int j = 0; j < num_var; ++j)
+        {
+            glp_constraint_add(&constraint, j+1, isl_int_get_si(src[j+1]));
+        }
+
+        glp_add_constraint(lp, &constraint, GLP_FX, -isl_int_get_si(src[0]), 0);
+    }
+
+    // Add inequalities
+
+    for(int i = 0; i < graph->lp->n_ineq; ++i)
+    {
+        // NOTE: Constant comes first in src;
+        isl_int * src = graph->lp->ineq[i];
+
+        glp_constraint_reset(&constraint);
+
+        for (int j = 0; j < num_var; ++j)
+        {
+            glp_constraint_add(&constraint, j+1, isl_int_get_si(src[j+1]));
+        }
+
+        glp_add_constraint(lp, &constraint, GLP_LO, -isl_int_get_si(src[0]), 0);
+    }
+
+    // For each node, a set of variables must be non-zero.
+    // Each variable is represented as v = p - n where
+    // both n and p are positive.
+
+    int decision_var_index = num_var + 1;
+
+    for (int i = 0; i < graph->n; ++i)
+    {
+        struct isl_sched_node *node = &graph->node[i];
+
+        if (!needs_row(graph, node))
+            continue;
+
+        int skip = node->rank;
+        int start = node_var_coef_offset(node) + 2 * skip + 1;
+        int count = (node->nvar - skip);
+
+        if (count < 1)
+            continue;
+
+        // x_i <= 4, for all i
+
+        for (int j = 0; j < 2 * count; ++j)
+        {
+            glp_set_col_bnds(lp, start + j, GLP_DB, 0, 4);
+        }
+
+        // sum_i(5^i * x_i) >= 1 - 5^count * d
+        // sum_i(5^i * x_i) + 5^count * d >= 1
+
+        {
+            glp_constraint_reset(&constraint);
+
+            for (int j = 0; j < count; ++j)
+            {
+                int c = pow(5, j);
+                glp_constraint_add(&constraint, start + 2*j, -c);
+                glp_constraint_add(&constraint, start + 2*j + 1, c);
+            }
+
+            glp_constraint_add(&constraint, decision_var_index, pow(5, count));
+
+            glp_add_constraint(lp, &constraint, GLP_LO, 1, 0);
+        }
+
+        // - sum_i(5^i * x_i) >= 1 - (1 - d) * 5^count
+        // - sum_i(5^i * x_i) >= 1 - (1 - d) * 5^count
+        // - sum_i(5^i * x_i) >= 1 - 5^count + 5^count * d
+        // - sum_i(5^i * x_i) - 5^count * d >= 1 - 5^count
+
+        {
+            glp_constraint_reset(&constraint);
+
+            for (int j = 0; j < count; ++j)
+            {
+                int c = pow(5, j);
+                glp_constraint_add(&constraint, start + 2*j, c);
+                glp_constraint_add(&constraint, start + 2*j + 1, -c);
+            }
+
+            glp_constraint_add(&constraint, decision_var_index, -pow(5, count));
+
+            glp_add_constraint(lp, &constraint, GLP_LO, 1 - pow(5, count), 0);
+        }
+
+        ++decision_var_index;
+    }
+
+
+    glp_iocp options;
+    glp_init_iocp(&options);
+    options.presolve = GLP_ON;
+    //options.tm_lim = 1000;
+    options.fp_heur = GLP_ON;
+    //options.ps_heur = GLP_ON;
+    options.gmi_cuts = GLP_ON;
+    options.mir_cuts = GLP_ON;
+    options.cov_cuts = GLP_ON;
+    options.clq_cuts = GLP_ON;
+
+#if 1
+    glp_set_obj_coef(lp, 2, 1);
+    glp_set_obj_dir(lp, GLP_MIN);
+
+    //glp_write_prob(lp, 0, "/dev/stdout");
+
+    int error = glp_intopt(lp, &options);
+    if (error)
+    {
+        printf("GLP ERROR: %d\n", error);
+    }
+
+    int status = glp_mip_status(lp);
+    printf("GLP STATUS: %d\n", status);
+
+    if (status != GLP_OPT && status != GLP_FEAS)
+        goto done;
+
+    double max_distance = glp_mip_obj_val(lp);
+    printf("GLP min distance: %f\n", max_distance);
+
+    // Print coefficients
+    for (int i = 0; i < num_var; ++i)
+    {
+        double val = glp_mip_col_val(lp, i+1);
+        printf("%d,", (int)val);
+    }
+    printf("\n");
+#else
+
+    int error, status;
+    double max_distance;
+
+    {
+        isl_val * v = isl_vec_get_element_val(isl_solution, 2);
+        max_distance = isl_val_get_num_si(v);
+    }
+#endif
+
+    printf("GLP distance: %f\n", max_distance);
+
+    printf("\n... Minimizing variables ...\n");
+
+    //options.presolve = GLP_OFF;
+    options.msg_lev = GLP_MSG_ERR;
+
+    double optimum = max_distance;
+
+    for (int i = 3; i <= num_var; ++i)
+    {
+        printf("- var %d\n", i);
+
+        glp_set_col_bnds(lp, i-1, GLP_FX, round(optimum), 0);
+
+        glp_set_obj_coef(lp, i-1, 0);
+        glp_set_obj_coef(lp, i,   1);
+        glp_set_obj_dir(lp, GLP_MIN);
+
+        error = glp_intopt(lp, &options);
+        if (error)
+        {
+            glp_print_mip_error(error);
+        }
+
+        status = glp_mip_status(lp);
+        glp_print_mip_status(status);
+
+        if (status != GLP_OPT && status != GLP_FEAS)
+            goto done;
+
+        optimum = glp_mip_obj_val(lp);
+        printf("optimum: %f, %d\n", optimum, (int) roundf(optimum));
+    }
+
+    // Print coefficients
+    for (int i = 0; i < num_var; ++i)
+    {
+        double val = glp_mip_col_val(lp, i+1);
+        printf("%d,", (int)val);
+    }
+    printf("\n");
+
+done:
+    glp_constraint_free(&constraint);
+    glp_delete_prob(lp);
+
+    return sol;
+}
+
+static void handle_gurobi_error(int error)
+{
+    if (error)
+    {
+        printf("Gurobi error %d\n", error);
+        abort();
+    }
+}
+
+static isl_vec * solve_lp_gurobi(struct isl_sched_graph *graph)
+{
+    isl_ctx * ctx = ctx = isl_basic_set_get_ctx(graph->lp);
+    isl_vec * sol = NULL;
+
+    int num_var = 0;
+    int num_decision_var = 0;
+    int total_num_var = 0;
+
+    num_var = isl_basic_set_total_dim(graph->lp);
+
+    for (int i = 0; i < graph->n; ++i)
+    {
+        struct isl_sched_node *node = &graph->node[i];
+
+        if (needs_row(graph, node))
+            num_decision_var += node->nvar - node->rank;
+    }
+
+    total_num_var = num_var + num_decision_var;
+
+    printf("%d var, %d decision var, %d total\n", num_var, num_decision_var, total_num_var);
+
+    int error = 0;
+
+    GRBenv * env;
+    GRBloadenv(&env, NULL);
+
+    GRBsetintparam(env, "LogToConsole", 0);
+    GRBmodel * model;
+    GRBnewmodel(env, &model, "", 0, NULL, NULL, NULL, NULL, NULL);
+
+    for (int i =  0; i < num_var; ++i)
+    {
+        error = GRBaddvar(model, 0, NULL, NULL, 0, 0, GRB_INFINITY, GRB_INTEGER, NULL);
+        handle_gurobi_error(error);
+    }
+
+    for (int i = num_var; i < total_num_var; ++i)
+    {
+        error = GRBaddvar(model, 0, NULL, NULL, 0, 0, 1, GRB_BINARY, NULL);
+        handle_gurobi_error(error);
+    }
+
+    int * var_idx = malloc(total_num_var * sizeof(int));
+    double * var_coef = malloc(total_num_var * sizeof(double));
+
+    // Add equalities
+
+    for(int i = 0; i < graph->lp->n_eq; ++i)
+    {
+        // NOTE: Constant comes first in isl_coefs;
+        isl_int * isl_coefs = graph->lp->eq[i];
+
+        for (int j = 0; j < num_var; ++j)
+        {
+            var_idx[j] = j;
+            var_coef[j] = isl_int_get_si(isl_coefs[j+1]);
+        }
+
+        error = GRBaddconstr(model, num_var, var_idx, var_coef, GRB_EQUAL, -isl_int_get_si(isl_coefs[0]), NULL);
+        handle_gurobi_error(error);
+    }
+
+    // Add inequalities
+
+    for(int i = 0; i < graph->lp->n_ineq; ++i)
+    {
+        // NOTE: Constant comes first in isl_coefs;
+        isl_int * isl_coefs = graph->lp->ineq[i];
+
+        for (int j = 0; j < num_var; ++j)
+        {
+            var_idx[j] = j;
+            var_coef[j] = isl_int_get_si(isl_coefs[j+1]);
+        }
+
+        error = GRBaddconstr(model, num_var, var_idx, var_coef, GRB_GREATER_EQUAL, -isl_int_get_si(isl_coefs[0]), NULL);
+        handle_gurobi_error(error);
+    }
+
+    // For each node, a set of variables must be non-zero.
+    // Each variable is represented as v = p - n where
+    // both n and p are positive.
+
+    int decision_var_index = num_var;
+
+    for (int i = 0; i < graph->n; ++i)
+    {
+        struct isl_sched_node *node = &graph->node[i];
+
+        if (!needs_row(graph, node))
+            continue;
+
+        int skip = node->rank;
+        int start = node_var_coef_offset(node) + 2 * skip;
+        int count = (node->nvar - skip);
+
+        if (count < 1)
+            continue;
+
+        // x_i_n <= 0 or x_i_p <= 0
+        // x_i_n <= d * L and x_i_p <= L - d * L
+        // x_i_n - d * L <= 0 and x_i_p + d * L <= L
+
+        for (int j = 0; j < count; ++j)
+        {
+            double L = 1e4;
+
+            // x_i_n
+            var_idx[0] = start + 2*j;
+            var_coef[0] = 1;
+
+            // d
+            var_idx[1] = decision_var_index;
+            var_coef[1] = -L;
+
+            error = GRBaddconstr(model, 2, var_idx, var_coef, GRB_LESS_EQUAL, 0, NULL);
+            handle_gurobi_error(error);
+
+            // x_i_p
+            var_idx[0] = start + 2*j + 1;
+            var_coef[0] = 1;
+
+            // d
+            var_idx[1] = decision_var_index;
+            var_coef[1] = L;
+
+            error = GRBaddconstr(model, 2, var_idx, var_coef, GRB_LESS_EQUAL, L, NULL);
+            handle_gurobi_error(error);
+
+            ++decision_var_index;
+        }
+
+        // sum_i(x_i_n + x_i_p) >= 1
+
+        for (int j = 0; j < count * 2; ++j)
+        {
+            var_idx[j] = start + j;
+            var_coef[j] = 1;
+        }
+
+        error = GRBaddconstr(model, count * 2, var_idx, var_coef, GRB_GREATER_EQUAL, 1, NULL);
+        handle_gurobi_error(error);
+    }
+
+    for (int i = 1; i < num_var; ++i)
+    {
+        var_idx[0] = i;
+        var_coef[0] = 1;
+        error = GRBsetobjectiven(model, i-1, num_var - i, 1, 0, 0, "", 0, 1, var_idx, var_coef);
+        handle_gurobi_error(error);
+    }
+
+    static int i = 0;
+    ++i;
+
+    char model_file_name[100];
+    sprintf(model_file_name, "model%d.lp", i);
+    printf("Writing model to file %s\n", model_file_name);
+    GRBwrite(model, model_file_name);
+
+    printf("Solving...\n");
+
+    error = GRBoptimize(model);
+    if (error)
+    {
+        printf("Gurobi error: %d\n", error);
+        goto done;
+    }
+
+    int status;
+    GRBgetintattr(model, "Status", &status);
+
+    printf("Gurobi status: %d\n", status);
+    if (status == GRB_OPTIMAL || status == GRB_SUBOPTIMAL)
+    {
+        GRBgetdblattrarray(model, "X", 0, total_num_var, var_coef);
+
+        printf("Gurobi solution:\n");
+        for (int i = 0; i < num_var; ++i)
+        {
+            //printf("%d=%d, ", i, (int) round(var_coef[i]));
+            printf("C%d=%g, ", i, var_coef[i]);
+        }
+        printf("\n");
+
+        printf("Decision vars\n");
+        for (int i = num_var; i < total_num_var; ++i)
+        {
+            //printf("%d=%d, ", i, (int) round(var_coef[i]));
+            printf("C%d=%g, ", i, var_coef[i]);
+        }
+        printf("\n");
+
+        sol = isl_vec_alloc(ctx, num_var + 1);
+        sol = isl_vec_set_element_si(sol, 0, 1);
+        for (int i = 0; i < num_var; ++i)
+            sol = isl_vec_set_element_si(sol, i+1, (int) round(var_coef[i]));
+    }
+    else
+    {
+        sol = isl_vec_alloc(ctx, 0);
+    }
+
+done:
+    GRBfreemodel(model);
+    GRBfreeenv(env);
+
+    free(var_idx);
+    free(var_coef);
+
+    return sol;
+}
+
 /* Solve the ILP problem constructed in setup_lp.
  * For each node such that all the remaining rows of its schedule
  * need to be non-trivial, we construct a non-triviality region.
@@ -2805,17 +3361,19 @@ static __isl_give isl_vec *solve_lp(struct isl_sched_graph *graph)
 
     graph->lp = isl_basic_set_detect_equalities(graph->lp);
 
-    //isl_printer_print_basic_set(printer, graph->lp);
-    //printf("\n");
+    isl_printer_print_basic_set(printer, graph->lp);
+    printf("\n");
 
-    int use_lpsolve = 1;
+    int use_gurobi = 1;
 
-    if (use_lpsolve)
+    if (use_gurobi)
     {
-        sol = solve_lp_lpsolve(graph);
+        sol = solve_lp_gurobi(graph);
     }
     else
     {
+        isl_vec_free(sol);
+
         for (i = 0; i < graph->n; ++i) {
             struct isl_sched_node *node = &graph->node[i];
             int skip = node->rank;
@@ -2857,7 +3415,13 @@ static __isl_give isl_vec *solve_lp(struct isl_sched_graph *graph)
             }
         }
     }
-
+#if 0
+    if (sol && sol->size)
+    {
+        //solve_lp_gurobi(graph, sol);
+        solve_lp_glpk(graph, sol);
+    }
+#endif
     isl_printer_free(printer);
 
 	return sol;
